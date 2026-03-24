@@ -1,62 +1,94 @@
-//! OpenAI Chat Completions streaming response types.
+//! OpenAI Responses API streaming event types.
+//!
+//! These types map to the Responses API (`POST /v1/responses`) streaming
+//! format, which uses named SSE events with typed JSON payloads.
 
 use serde::Deserialize;
 
-/// A streaming chunk from the Chat Completions API.
+/// Text delta event — `response.output_text.delta`
 #[derive(Deserialize, Debug)]
-pub(crate) struct ChatCompletionChunk {
-    /// Choices in this chunk (empty in the final usage-only chunk).
+pub(crate) struct TextDelta {
+    /// The item ID this delta belongs to.
+    pub item_id: String,
+    /// Index in the output array.
+    pub output_index: usize,
+    /// Index within the content parts.
+    pub content_index: usize,
+    /// The text chunk.
+    pub delta: String,
+}
+
+/// Function call arguments delta — `response.function_call_arguments.delta`
+#[derive(Deserialize, Debug)]
+pub(crate) struct FunctionCallArgsDelta {
+    /// The item ID (tool call ID).
+    pub item_id: String,
+    /// Index in the output array.
+    pub output_index: usize,
+    /// Partial JSON arguments.
+    pub delta: String,
+}
+
+/// Function call arguments done — `response.function_call_arguments.done`
+#[derive(Deserialize, Debug)]
+pub(crate) struct FunctionCallArgsDone {
+    /// The item ID (tool call ID).
+    pub item_id: String,
+    /// Index in the output array.
+    pub output_index: usize,
+    /// The function name.
+    pub name: String,
+    /// Complete JSON arguments.
+    pub arguments: String,
+}
+
+/// Output item added — `response.output_item.added`
+#[derive(Deserialize, Debug)]
+pub(crate) struct OutputItemAdded {
+    /// The output item.
+    pub item: OutputItem,
+    /// Index in the output array.
+    pub output_index: usize,
+}
+
+/// An item in the response output array.
+#[derive(Deserialize, Debug)]
+pub(crate) struct OutputItem {
+    /// Item ID.
+    pub id: String,
+    /// Item type: "message", "function_call", etc.
+    #[serde(rename = "type")]
+    pub item_type: String,
+    /// Function name (only for function_call items).
     #[serde(default)]
-    pub(crate) choices: Vec<ChunkChoice>,
-    /// Usage statistics (present only in the final chunk when
-    /// `stream_options.include_usage` is set).
-    pub(crate) usage: Option<Usage>,
+    pub name: Option<String>,
+    /// Call ID for function calls.
+    #[serde(default)]
+    pub call_id: Option<String>,
 }
 
-/// A single choice within a streaming chunk.
+/// Response completed — `response.completed`
 #[derive(Deserialize, Debug)]
-pub(crate) struct ChunkChoice {
-    /// The delta content for this choice.
-    pub(crate) delta: ChunkDelta,
-    /// Finish reason: `null` while streaming, then `"stop"`, `"tool_calls"`,
-    /// or `"length"` at the end.
-    pub(crate) finish_reason: Option<String>,
+pub(crate) struct ResponseCompleted {
+    /// The full response object.
+    pub response: ResponseObject,
 }
 
-/// Incremental delta within a streaming choice.
+/// The response object within a completed event.
 #[derive(Deserialize, Debug)]
-pub(crate) struct ChunkDelta {
-    /// Text content delta.
-    pub(crate) content: Option<String>,
-    /// Tool call deltas (for parallel tool calls, indexed).
-    pub(crate) tool_calls: Option<Vec<ChunkToolCall>>,
-}
-
-/// A tool call delta in the streaming response.
-#[derive(Deserialize, Debug)]
-pub(crate) struct ChunkToolCall {
-    /// Index of the tool call (supports parallel tool calls).
-    pub(crate) index: usize,
-    /// Tool call ID (present only in the first chunk for this call).
-    pub(crate) id: Option<String>,
-    /// Function details.
-    pub(crate) function: Option<ChunkFunction>,
-}
-
-/// Function details within a tool call delta.
-#[derive(Deserialize, Debug)]
-pub(crate) struct ChunkFunction {
-    /// Function name (present only in the first chunk for this call).
-    pub(crate) name: Option<String>,
-    /// Partial JSON arguments to append.
-    pub(crate) arguments: Option<String>,
+pub(crate) struct ResponseObject {
+    /// Response status.
+    pub status: String,
+    /// Token usage.
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 /// Token usage statistics.
 #[derive(Deserialize, Debug)]
 pub(crate) struct Usage {
-    /// Input/prompt tokens consumed.
-    pub(crate) prompt_tokens: usize,
-    /// Output/completion tokens generated.
-    pub(crate) completion_tokens: usize,
+    /// Input tokens consumed.
+    pub input_tokens: usize,
+    /// Output tokens generated.
+    pub output_tokens: usize,
 }

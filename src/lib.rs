@@ -5,21 +5,19 @@
 
 //! Native OpenAI LLM provider capsule.
 //!
-//! Talks directly to OpenAI's Chat Completions API with support for
-//! OpenAI-specific features not available through generic compat layers:
+//! Uses OpenAI's **Responses API** (`POST /v1/responses`) — the recommended
+//! API for new projects, replacing Chat Completions. Key differences:
 //!
-//! - **Structured outputs** — `response_format: { type: "json_schema", ... }`
-//!   with `strict: true` for guaranteed schema adherence
-//! - **Strict function calling** — `strict: true` on tool definitions ensures
-//!   the model always follows the declared parameter schema
-//! - **Reasoning effort** — `reasoning_effort` for o-series models (low/medium/high)
+//! - **`input`** instead of `messages`, **`instructions`** instead of system message
+//! - **Named SSE events** (`event: response.output_text.delta`) instead of `data: {json}`
+//! - **Structured outputs** via `text.format: { type: "json_schema", ... }`
+//! - **Strict function calling** — `strict: true` on tool definitions
+//! - **Reasoning effort** — `none`/`low`/`medium`/`high`/`xhigh` for GPT-5.x and o-series
 //! - **Service tier** — `auto`/`default`/`flex`/`priority` routing
-//! - **Parallel tool calls** — explicit `parallel_tool_calls` control
-//! - **Predicted output** — `prediction` for faster generation on known-structure responses
-//! - **`max_completion_tokens`** — OpenAI's preferred field (distinct from generic `max_tokens`)
+//! - **`max_output_tokens`** at the top level
 //!
-//! For generic OpenAI-compatible providers (Groq, Together, Mistral, etc.),
-//! use `astrid-capsule-openai-compat` instead.
+//! For generic OpenAI-compatible providers that still use `/v1/chat/completions`
+//! (Groq, Together, Mistral, etc.), use `astrid-capsule-openai-compat` instead.
 
 mod models;
 mod schemas;
@@ -27,7 +25,9 @@ mod schemas;
 use astrid_sdk::prelude::*;
 use astrid_sdk::types::{IpcPayload, Message, MessageContent, MessageRole, StreamEvent};
 use models::lookup;
-use schemas::ChatCompletionChunk;
+use schemas::{
+    FunctionCallArgsDelta, FunctionCallArgsDone, OutputItemAdded, ResponseCompleted, TextDelta,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -68,15 +68,11 @@ impl OpenAIProvider {
     }
 
     /// Returns provider metadata for IPC-based provider discovery.
-    ///
-    /// Resolves model capabilities from the built-in registry. Env vars
-    /// override registry defaults when set.
     #[astrid::interceptor("llm_describe")]
     pub fn llm_describe(&self, _payload: serde_json::Value) -> Result<serde_json::Value, SysError> {
         let model_id = env::var("model").unwrap_or_else(|_| "gpt-5.4".into());
         let info = lookup(&model_id);
 
-        // Env vars override registry defaults.
         let context_window = env::var("context_window")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -113,7 +109,7 @@ impl OpenAIProvider {
 }
 
 impl OpenAIProvider {
-    /// Build and send the HTTP request, then parse the SSE response.
+    /// Build and send the Responses API request, then parse the SSE stream.
     fn execute_request(
         request_id: Uuid,
         model: &str,
@@ -121,7 +117,7 @@ impl OpenAIProvider {
         tools: &[astrid_sdk::types::LlmToolDefinition],
         system: &str,
     ) -> Result<(), SysError> {
-        let url = format!("{BASE_URL}/v1/chat/completions");
+        let url = format!("{BASE_URL}/v1/responses");
 
         let resolved_model = if model.is_empty() {
             env::var("model").unwrap_or_else(|_| "gpt-5.4".into())
@@ -129,53 +125,46 @@ impl OpenAIProvider {
             model.to_string()
         };
 
-        let mut api_messages: Vec<Value> = Vec::new();
-
-        if !system.is_empty() {
-            api_messages.push(serde_json::json!({
-                "role": "system",
-                "content": system,
-            }));
-        }
-
-        for msg in messages {
-            if msg.role != MessageRole::System {
-                api_messages.push(Self::convert_message(msg));
-            }
-        }
-
         let info = lookup(&resolved_model);
+
+        // Build input array from messages.
+        let input = Self::build_input(messages);
 
         let mut request_body = serde_json::json!({
             "model": resolved_model,
-            "messages": api_messages,
+            "input": input,
             "stream": true,
-            "stream_options": { "include_usage": true },
         });
 
-        // max_completion_tokens — env override, then registry default.
+        // System instructions go at the top level, not in input.
+        if !system.is_empty() {
+            request_body["instructions"] = Value::String(system.to_string());
+        }
+
+        // max_output_tokens — env override, then registry default.
         let max_tokens = env::var("max_output_tokens")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(info.max_output_tokens);
         if max_tokens > 0 {
-            request_body["max_completion_tokens"] = serde_json::json!(max_tokens);
+            request_body["max_output_tokens"] = serde_json::json!(max_tokens);
         }
 
-        // Temperature — not supported on reasoning models.
-        if !info.is_reasoning
+        // Temperature — only supported when reasoning effort is `none` on GPT-5.4.
+        // On older reasoning models (o-series, GPT-5.2), not supported at all.
+        let reasoning_effort = env::var("reasoning_effort").unwrap_or_default();
+        let effort_is_none = reasoning_effort.is_empty() || reasoning_effort == "none";
+
+        if effort_is_none
             && let Ok(temp) = env::var("temperature")
             && let Ok(t) = temp.parse::<f64>()
         {
             request_body["temperature"] = serde_json::json!(t);
         }
 
-        // Reasoning effort — only for o-series models.
-        if info.is_reasoning
-            && let Ok(effort) = env::var("reasoning_effort")
-            && !effort.is_empty()
-        {
-            request_body["reasoning_effort"] = serde_json::json!(effort);
+        // Reasoning effort.
+        if info.is_reasoning && !reasoning_effort.is_empty() && reasoning_effort != "none" {
+            request_body["reasoning"] = serde_json::json!({ "effort": reasoning_effort });
         }
 
         // Service tier.
@@ -192,17 +181,14 @@ impl OpenAIProvider {
                 .map(|t| {
                     serde_json::json!({
                         "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.input_schema,
-                            "strict": true,
-                        }
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                        "strict": true,
                     })
                 })
                 .collect();
             request_body["tools"] = Value::Array(api_tools);
-            request_body["parallel_tool_calls"] = serde_json::json!(true);
         }
 
         let api_key = env::var("api_key").unwrap_or_default();
@@ -237,10 +223,13 @@ impl OpenAIProvider {
         result
     }
 
-    /// Stream SSE chunks, publishing IPC events as they arrive.
+    /// Parse the Responses API SSE stream.
+    ///
+    /// The Responses API uses named events (`event: <type>\ndata: <json>\n\n`)
+    /// instead of Chat Completions' bare `data: {json}` format.
     fn parse_sse_stream(request_id: Uuid, stream: &http::HttpStreamHandle) -> Result<(), SysError> {
-        let mut active_tools: Vec<(String, String)> = Vec::new();
         let mut line_buffer = String::new();
+        let mut current_event: Option<String> = None;
 
         while let Some(chunk) = http::stream_read(stream)? {
             let chunk_str = String::from_utf8_lossy(&chunk);
@@ -259,6 +248,13 @@ impl OpenAIProvider {
                 line_buffer = line_buffer[(newline_pos + 1)..].to_string();
 
                 if line.is_empty() {
+                    // Blank line = end of SSE event block.
+                    current_event = None;
+                    continue;
+                }
+
+                if let Some(event_type) = line.strip_prefix("event: ") {
+                    current_event = Some(event_type.to_string());
                     continue;
                 }
 
@@ -266,96 +262,86 @@ impl OpenAIProvider {
                     continue;
                 };
 
-                if data == "[DONE]" {
-                    Self::publish_stream(request_id, StreamEvent::Done)?;
-                    return Ok(());
-                }
-
-                let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) else {
+                let Some(ref event_type) = current_event else {
                     continue;
                 };
 
-                Self::process_chunk(request_id, &chunk, &mut active_tools)?;
+                Self::handle_event(request_id, event_type, data)?;
             }
         }
 
         Ok(())
     }
 
-    /// Process a single SSE chunk.
-    fn process_chunk(
-        request_id: Uuid,
-        chunk: &ChatCompletionChunk,
-        active_tools: &mut Vec<(String, String)>,
-    ) -> Result<(), SysError> {
-        if let Some(usage) = &chunk.usage {
-            Self::publish_stream(
-                request_id,
-                StreamEvent::Usage {
-                    input_tokens: usage.prompt_tokens,
-                    output_tokens: usage.completion_tokens,
-                },
-            )?;
-        }
-
-        let Some(choice) = chunk.choices.first() else {
-            return Ok(());
-        };
-
-        if let Some(ref text) = choice.delta.content
-            && !text.is_empty()
-        {
-            Self::publish_stream(request_id, StreamEvent::TextDelta(text.clone()))?;
-        }
-
-        if let Some(ref tool_calls) = choice.delta.tool_calls {
-            for tc in tool_calls {
-                while active_tools.len() <= tc.index {
-                    active_tools.push((String::new(), String::new()));
+    /// Dispatch a single named SSE event.
+    fn handle_event(request_id: Uuid, event_type: &str, data: &str) -> Result<(), SysError> {
+        match event_type {
+            "response.output_text.delta" => {
+                if let Ok(delta) = serde_json::from_str::<TextDelta>(data)
+                    && !delta.delta.is_empty()
+                {
+                    Self::publish_stream(request_id, StreamEvent::TextDelta(delta.delta))?;
                 }
-
-                if let Some(ref id) = tc.id {
-                    active_tools[tc.index].0 = id.clone();
-                }
-
-                if let Some(ref func) = tc.function {
-                    if let Some(ref name) = func.name {
-                        active_tools[tc.index].1 = name.clone();
-                        Self::publish_stream(
-                            request_id,
-                            StreamEvent::ToolCallStart {
-                                id: active_tools[tc.index].0.clone(),
-                                name: name.clone(),
-                            },
-                        )?;
-                    }
-
-                    if let Some(ref args) = func.arguments
-                        && !args.is_empty()
-                    {
-                        Self::publish_stream(
-                            request_id,
-                            StreamEvent::ToolCallDelta {
-                                id: active_tools[tc.index].0.clone(),
-                                args_delta: args.clone(),
-                            },
-                        )?;
+            }
+            "response.output_item.added" => {
+                if let Ok(item) = serde_json::from_str::<OutputItemAdded>(data)
+                    && item.item.item_type == "function_call"
+                {
+                    let id = item.item.call_id.unwrap_or_else(|| item.item.id.clone());
+                    let name = item.item.name.unwrap_or_default();
+                    if !name.is_empty() {
+                        Self::publish_stream(request_id, StreamEvent::ToolCallStart { id, name })?;
                     }
                 }
             }
-        }
-
-        if let Some(ref reason) = choice.finish_reason
-            && reason == "tool_calls"
-        {
-            for (id, _name) in active_tools.iter() {
-                if !id.is_empty() {
-                    Self::publish_stream(request_id, StreamEvent::ToolCallEnd { id: id.clone() })?;
+            "response.function_call_arguments.delta" => {
+                if let Ok(delta) = serde_json::from_str::<FunctionCallArgsDelta>(data)
+                    && !delta.delta.is_empty()
+                {
+                    Self::publish_stream(
+                        request_id,
+                        StreamEvent::ToolCallDelta {
+                            id: delta.item_id,
+                            args_delta: delta.delta,
+                        },
+                    )?;
                 }
             }
-            active_tools.clear();
+            "response.function_call_arguments.done" => {
+                if let Ok(done) = serde_json::from_str::<FunctionCallArgsDone>(data) {
+                    Self::publish_stream(
+                        request_id,
+                        StreamEvent::ToolCallEnd { id: done.item_id },
+                    )?;
+                }
+            }
+            "response.completed" => {
+                if let Ok(completed) = serde_json::from_str::<ResponseCompleted>(data)
+                    && let Some(usage) = completed.response.usage
+                {
+                    Self::publish_stream(
+                        request_id,
+                        StreamEvent::Usage {
+                            input_tokens: usage.input_tokens,
+                            output_tokens: usage.output_tokens,
+                        },
+                    )?;
+                }
+                Self::publish_stream(request_id, StreamEvent::Done)?;
+            }
+            "response.failed" => {
+                let _ = log::error(format!("OpenAI response failed: {data}"));
+                Self::publish_stream(
+                    request_id,
+                    StreamEvent::Error(format!("Response failed: {data}")),
+                )?;
+            }
+            // Ignore lifecycle events we don't need: response.created,
+            // response.in_progress, response.output_item.done,
+            // response.content_part.added, response.content_part.done,
+            // response.output_text.done
+            _ => {}
         }
-
         Ok(())
     }
 
@@ -367,7 +353,22 @@ impl OpenAIProvider {
         )
     }
 
-    /// Convert an Astrid `Message` to OpenAI Chat Completions JSON format.
+    /// Build the `input` array for the Responses API from Astrid messages.
+    fn build_input(messages: &[Message]) -> Vec<Value> {
+        let mut input: Vec<Value> = Vec::new();
+
+        for msg in messages {
+            if msg.role == MessageRole::System {
+                // System messages go in `instructions`, not input.
+                continue;
+            }
+            input.push(Self::convert_message(msg));
+        }
+
+        input
+    }
+
+    /// Convert an Astrid `Message` to Responses API input format.
     fn convert_message(message: &Message) -> Value {
         match &message.content {
             MessageContent::Text(text) => {
@@ -377,35 +378,39 @@ impl OpenAIProvider {
                 })
             }
             MessageContent::ToolCalls(calls) => {
+                // In Responses API, tool calls are separate output items.
+                // For conversation history, we send them as assistant messages.
                 let tool_calls: Vec<Value> = calls
                     .iter()
                     .map(|c| {
                         serde_json::json!({
+                            "type": "function_call",
                             "id": c.id,
-                            "type": "function",
-                            "function": {
-                                "name": c.name,
-                                "arguments": if c.arguments.is_string() {
-                                    c.arguments.clone()
-                                } else {
-                                    Value::String(c.arguments.to_string())
-                                },
-                            }
+                            "call_id": c.id,
+                            "name": c.name,
+                            "arguments": if c.arguments.is_string() {
+                                c.arguments.clone()
+                            } else {
+                                Value::String(c.arguments.to_string())
+                            },
                         })
                     })
                     .collect();
 
-                serde_json::json!({
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": tool_calls,
-                })
+                // Return tool calls as separate items in input.
+                // The Responses API expects function_call items directly.
+                if tool_calls.len() == 1 {
+                    tool_calls.into_iter().next().unwrap_or_default()
+                } else {
+                    // Multiple tool calls — return as array (will be flattened by caller if needed).
+                    serde_json::json!(tool_calls)
+                }
             }
             MessageContent::ToolResult(result) => {
                 serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": result.call_id,
-                    "content": result.content,
+                    "type": "function_call_output",
+                    "call_id": result.call_id,
+                    "output": result.content,
                 })
             }
             MessageContent::MultiPart(parts) => {
@@ -413,14 +418,12 @@ impl OpenAIProvider {
                     .iter()
                     .map(|p| match p {
                         astrid_sdk::types::ContentPart::Text { text } => {
-                            serde_json::json!({"type": "text", "text": text})
+                            serde_json::json!({"type": "input_text", "text": text})
                         }
                         astrid_sdk::types::ContentPart::Image { media_type, data } => {
                             serde_json::json!({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": format!("data:{media_type};base64,{data}"),
-                                }
+                                "type": "input_image",
+                                "image_url": format!("data:{media_type};base64,{data}"),
                             })
                         }
                     })
@@ -437,7 +440,7 @@ impl OpenAIProvider {
     /// Map Astrid `MessageRole` to OpenAI role string.
     fn role_str(role: MessageRole) -> &'static str {
         match role {
-            MessageRole::System => "system",
+            MessageRole::System => "developer",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
             MessageRole::Tool => "tool",

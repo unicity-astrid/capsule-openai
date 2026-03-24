@@ -9,13 +9,13 @@ astrid-version = ">=0.5.0"
 id = "openai"
 file = "astrid_capsule_openai.wasm"
 type = "executable"
-capabilities = { net = ["*"] }
+capabilities = { net = ["api.openai.com"] }
 
 [exports.astrid]
 llm = "1.0.0"
 
 [capabilities]
-net = ["*"]
+net = ["api.openai.com"]
 ipc_publish = ["llm.v1.stream.openai", "llm.v1.response.describe.*"]
 
 [env]
