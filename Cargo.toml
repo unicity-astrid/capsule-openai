@@ -1,0 +1,21 @@
+[package]
+name = "astrid-capsule-openai"
+version = "0.1.0"
+edition = "2024"
+description = "Native OpenAI LLM provider capsule for Astrid OS"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+astrid-sdk = { version = "0.5.3", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+extism-pdk = "1.4.1"
+uuid = { version = "1.0", features = ["serde"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

@@ -1,0 +1,36 @@
+[package]
+name = "astrid-capsule-openai"
+version = "0.1.0"
+description = "Native OpenAI LLM Provider"
+authors = ["Joshua J. Bouw <dev@joshuajbouw.com>", "Unicity Labs <info@unicity-labs.com>"]
+astrid-version = ">=0.5.0"
+
+[[component]]
+id = "openai"
+file = "astrid_capsule_openai.wasm"
+type = "executable"
+capabilities = { net = ["*"] }
+
+[exports.astrid]
+llm = "1.0.0"
+
+[capabilities]
+net = ["*"]
+ipc_publish = ["llm.v1.stream.openai", "llm.v1.response.describe.*"]
+
+[env]
+api_key = { type = "secret", request = "Enter your OpenAI API key", placeholder = "sk-..." }
+model = { type = "string", request = "Enter the default model ID", default = "gpt-4.1", placeholder = "gpt-4.1" }
+context_window = { type = "integer", request = "Enter the model's context window size (tokens)", default = "128000", placeholder = "128000" }
+max_output_tokens = { type = "integer", request = "Enter the max output tokens", default = "8192", placeholder = "8192" }
+temperature = { type = "string", request = "Enter the default temperature (0.0-2.0, blank = provider default)", placeholder = "0.7" }
+reasoning_effort = { type = "string", request = "Reasoning effort for o-series models (low/medium/high, blank = default)", placeholder = "" }
+service_tier = { type = "string", request = "Service tier (auto/default/flex/priority, blank = auto)", default = "auto", placeholder = "auto" }
+
+[[interceptor]]
+event = "llm.v1.request.describe"
+action = "llm_describe"
+
+[[interceptor]]
+event = "llm.v1.request.generate.openai"
+action = "handle_llm_request"

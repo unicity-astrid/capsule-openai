@@ -1,0 +1,62 @@
+//! OpenAI Chat Completions streaming response types.
+
+use serde::Deserialize;
+
+/// A streaming chunk from the Chat Completions API.
+#[derive(Deserialize, Debug)]
+pub(crate) struct ChatCompletionChunk {
+    /// Choices in this chunk (empty in the final usage-only chunk).
+    #[serde(default)]
+    pub(crate) choices: Vec<ChunkChoice>,
+    /// Usage statistics (present only in the final chunk when
+    /// `stream_options.include_usage` is set).
+    pub(crate) usage: Option<Usage>,
+}
+
+/// A single choice within a streaming chunk.
+#[derive(Deserialize, Debug)]
+pub(crate) struct ChunkChoice {
+    /// The delta content for this choice.
+    pub(crate) delta: ChunkDelta,
+    /// Finish reason: `null` while streaming, then `"stop"`, `"tool_calls"`,
+    /// or `"length"` at the end.
+    pub(crate) finish_reason: Option<String>,
+}
+
+/// Incremental delta within a streaming choice.
+#[derive(Deserialize, Debug)]
+pub(crate) struct ChunkDelta {
+    /// Text content delta.
+    pub(crate) content: Option<String>,
+    /// Tool call deltas (for parallel tool calls, indexed).
+    pub(crate) tool_calls: Option<Vec<ChunkToolCall>>,
+}
+
+/// A tool call delta in the streaming response.
+#[derive(Deserialize, Debug)]
+pub(crate) struct ChunkToolCall {
+    /// Index of the tool call (supports parallel tool calls).
+    pub(crate) index: usize,
+    /// Tool call ID (present only in the first chunk for this call).
+    pub(crate) id: Option<String>,
+    /// Function details.
+    pub(crate) function: Option<ChunkFunction>,
+}
+
+/// Function details within a tool call delta.
+#[derive(Deserialize, Debug)]
+pub(crate) struct ChunkFunction {
+    /// Function name (present only in the first chunk for this call).
+    pub(crate) name: Option<String>,
+    /// Partial JSON arguments to append.
+    pub(crate) arguments: Option<String>,
+}
+
+/// Token usage statistics.
+#[derive(Deserialize, Debug)]
+pub(crate) struct Usage {
+    /// Input/prompt tokens consumed.
+    pub(crate) prompt_tokens: usize,
+    /// Output/completion tokens generated.
+    pub(crate) completion_tokens: usize,
+}
