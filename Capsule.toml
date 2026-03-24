@@ -20,7 +20,7 @@ ipc_publish = ["llm.v1.stream.openai", "llm.v1.response.describe.*"]
 
 [env]
 api_key = { type = "secret", request = "Enter your OpenAI API key", placeholder = "sk-..." }
-model = { type = "string", request = "Enter the model ID (gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, o3, o3-mini, o4-mini, o1, o1-mini, o1-pro, gpt-4.5-preview)", default = "gpt-4.1", placeholder = "gpt-4.1" }
+model = { type = "string", request = "Enter the model ID (gpt-5.4, gpt-5.4-mini, gpt-5.4-nano, gpt-5.3, gpt-5.3-codex, gpt-5.2, gpt-5.2-codex, gpt-4.1, gpt-4.1-mini, o4-mini, o3, o3-mini)", default = "gpt-5.4", placeholder = "gpt-5.4" }
 temperature = { type = "string", request = "Enter the default temperature (0.0-2.0, blank = provider default)", placeholder = "0.7" }
 reasoning_effort = { type = "string", request = "Reasoning effort for o-series models (low/medium/high, blank = default)", placeholder = "" }
 service_tier = { type = "string", request = "Service tier (auto/default/flex/priority, blank = auto)", default = "auto", placeholder = "auto" }

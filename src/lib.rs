@@ -73,7 +73,7 @@ impl OpenAIProvider {
     /// override registry defaults when set.
     #[astrid::interceptor("llm_describe")]
     pub fn llm_describe(&self, _payload: serde_json::Value) -> Result<serde_json::Value, SysError> {
-        let model_id = env::var("model").unwrap_or_else(|_| "gpt-4.1".into());
+        let model_id = env::var("model").unwrap_or_else(|_| "gpt-5.4".into());
         let info = lookup(&model_id);
 
         // Env vars override registry defaults.
@@ -124,7 +124,7 @@ impl OpenAIProvider {
         let url = format!("{BASE_URL}/v1/chat/completions");
 
         let resolved_model = if model.is_empty() {
-            env::var("model").unwrap_or_else(|_| "gpt-4.1".into())
+            env::var("model").unwrap_or_else(|_| "gpt-5.4".into())
         } else {
             model.to_string()
         };

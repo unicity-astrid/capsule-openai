@@ -3,6 +3,11 @@
 //! Users select a model ID and the capsule resolves context window,
 //! max output tokens, and feature flags automatically. Env vars
 //! override these defaults when set.
+//!
+//! Last updated: 2026-03-25. Sources:
+//! - https://developers.openai.com/api/docs/models
+//! - https://developers.openai.com/api/docs/models/gpt-5.4
+//! - https://developers.openai.com/api/docs/models/gpt-5.2
 
 /// Known OpenAI model capabilities.
 #[derive(Debug, Clone, Copy)]
@@ -22,16 +27,99 @@ pub(crate) struct ModelInfo {
     pub supports_tools: bool,
     /// Supports structured outputs (response_format json_schema).
     pub supports_structured_output: bool,
-    /// Is a reasoning model (o-series) — supports reasoning_effort.
+    /// Supports reasoning effort levels (none/low/medium/high/xhigh).
     pub is_reasoning: bool,
 }
 
 /// Static registry of known OpenAI models.
 ///
-/// Last updated: 2026-03. Update this table when OpenAI releases new models.
+/// Update this table when OpenAI releases new models.
 /// Unknown models fall back to conservative defaults via [`lookup`].
 pub(crate) static MODELS: &[ModelInfo] = &[
-    // ── GPT-4.1 series ──────────────────────────────────────────
+    // ── GPT-5.4 series (March 2026, current frontier) ────────────
+    ModelInfo {
+        id: "gpt-5.4",
+        name: "GPT-5.4",
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: true, // supports effort: none/low/medium/high/xhigh
+    },
+    ModelInfo {
+        id: "gpt-5.4-mini",
+        name: "GPT-5.4 Mini",
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: true,
+    },
+    ModelInfo {
+        id: "gpt-5.4-nano",
+        name: "GPT-5.4 Nano",
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: true,
+    },
+    // ── GPT-5.3 series ───────────────────────────────────────────
+    ModelInfo {
+        id: "gpt-5.3",
+        name: "GPT-5.3 Instant",
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: false,
+    },
+    ModelInfo {
+        id: "gpt-5.3-codex",
+        name: "GPT-5.3 Codex",
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: true,
+    },
+    ModelInfo {
+        id: "gpt-5.3-codex-spark",
+        name: "GPT-5.3 Codex Spark",
+        context_window: 128_000,
+        max_output_tokens: 128_000,
+        supports_vision: false,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: false,
+    },
+    // ── GPT-5.2 series (December 2025) ───────────────────────────
+    ModelInfo {
+        id: "gpt-5.2",
+        name: "GPT-5.2",
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: true,
+    },
+    ModelInfo {
+        id: "gpt-5.2-codex",
+        name: "GPT-5.2 Codex",
+        context_window: 400_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: true,
+    },
+    // ── GPT-4.1 series (April 2025, still available) ─────────────
     ModelInfo {
         id: "gpt-4.1",
         name: "GPT-4.1",
@@ -57,27 +145,6 @@ pub(crate) static MODELS: &[ModelInfo] = &[
         name: "GPT-4.1 Nano",
         context_window: 1_048_576,
         max_output_tokens: 32_768,
-        supports_vision: true,
-        supports_tools: true,
-        supports_structured_output: true,
-        is_reasoning: false,
-    },
-    // ── GPT-4o series ────────────────────────────────────────────
-    ModelInfo {
-        id: "gpt-4o",
-        name: "GPT-4o",
-        context_window: 128_000,
-        max_output_tokens: 16_384,
-        supports_vision: true,
-        supports_tools: true,
-        supports_structured_output: true,
-        is_reasoning: false,
-    },
-    ModelInfo {
-        id: "gpt-4o-mini",
-        name: "GPT-4o Mini",
-        context_window: 128_000,
-        max_output_tokens: 16_384,
         supports_vision: true,
         supports_tools: true,
         supports_structured_output: true,
@@ -114,40 +181,10 @@ pub(crate) static MODELS: &[ModelInfo] = &[
         supports_structured_output: true,
         is_reasoning: true,
     },
+    // ── GPT-4o series (legacy, still available) ──────────────────
     ModelInfo {
-        id: "o1",
-        name: "o1",
-        context_window: 200_000,
-        max_output_tokens: 100_000,
-        supports_vision: true,
-        supports_tools: true,
-        supports_structured_output: true,
-        is_reasoning: true,
-    },
-    ModelInfo {
-        id: "o1-mini",
-        name: "o1 Mini",
-        context_window: 128_000,
-        max_output_tokens: 65_536,
-        supports_vision: false,
-        supports_tools: true,
-        supports_structured_output: true,
-        is_reasoning: true,
-    },
-    ModelInfo {
-        id: "o1-pro",
-        name: "o1 Pro",
-        context_window: 200_000,
-        max_output_tokens: 100_000,
-        supports_vision: true,
-        supports_tools: true,
-        supports_structured_output: true,
-        is_reasoning: true,
-    },
-    // ── GPT-4.5 ──────────────────────────────────────────────────
-    ModelInfo {
-        id: "gpt-4.5-preview",
-        name: "GPT-4.5 Preview",
+        id: "gpt-4o",
+        name: "GPT-4o",
         context_window: 128_000,
         max_output_tokens: 16_384,
         supports_vision: true,
@@ -155,15 +192,14 @@ pub(crate) static MODELS: &[ModelInfo] = &[
         supports_structured_output: true,
         is_reasoning: false,
     },
-    // ── Legacy (still available) ─────────────────────────────────
     ModelInfo {
-        id: "gpt-4-turbo",
-        name: "GPT-4 Turbo",
+        id: "gpt-4o-mini",
+        name: "GPT-4o Mini",
         context_window: 128_000,
-        max_output_tokens: 4_096,
+        max_output_tokens: 16_384,
         supports_vision: true,
         supports_tools: true,
-        supports_structured_output: false,
+        supports_structured_output: true,
         is_reasoning: false,
     },
 ];
@@ -173,7 +209,7 @@ const UNKNOWN_DEFAULTS: ModelInfo = ModelInfo {
     id: "unknown",
     name: "Unknown Model",
     context_window: 128_000,
-    max_output_tokens: 8_192,
+    max_output_tokens: 16_384,
     supports_vision: false,
     supports_tools: true,
     supports_structured_output: false,
@@ -183,14 +219,14 @@ const UNKNOWN_DEFAULTS: ModelInfo = ModelInfo {
 /// Look up a model by ID. Returns conservative defaults for unknown models.
 ///
 /// Matches exact IDs first, then tries prefix matching for dated snapshots
-/// (e.g., `gpt-4o-2024-08-06` matches `gpt-4o`).
+/// (e.g., `gpt-5.4-2026-03-05` matches `gpt-5.4`).
 pub(crate) fn lookup(model_id: &str) -> &'static ModelInfo {
     // Exact match.
     if let Some(info) = MODELS.iter().find(|m| m.id == model_id) {
         return info;
     }
 
-    // Prefix match for dated snapshots (e.g., gpt-4o-2024-08-06 → gpt-4o).
+    // Prefix match for dated snapshots (e.g., gpt-5.4-2026-03-05 → gpt-5.4).
     if let Some(info) = MODELS.iter().find(|m| model_id.starts_with(m.id)) {
         return info;
     }
