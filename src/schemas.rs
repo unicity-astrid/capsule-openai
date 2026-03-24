@@ -1,12 +1,10 @@
 //! OpenAI Responses API streaming event types.
-//!
-//! These types map to the Responses API (`POST /v1/responses`) streaming
-//! format, which uses named SSE events with typed JSON payloads.
 
 use serde::Deserialize;
 
 /// Text delta event — `response.output_text.delta`
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
+#[expect(dead_code)]
 pub(crate) struct TextDelta {
     /// The item ID this delta belongs to.
     pub item_id: String,
@@ -19,7 +17,8 @@ pub(crate) struct TextDelta {
 }
 
 /// Function call arguments delta — `response.function_call_arguments.delta`
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
+#[expect(dead_code)]
 pub(crate) struct FunctionCallArgsDelta {
     /// The item ID (tool call ID).
     pub item_id: String,
@@ -30,7 +29,8 @@ pub(crate) struct FunctionCallArgsDelta {
 }
 
 /// Function call arguments done — `response.function_call_arguments.done`
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
+#[expect(dead_code)]
 pub(crate) struct FunctionCallArgsDone {
     /// The item ID (tool call ID).
     pub item_id: String,
@@ -43,7 +43,8 @@ pub(crate) struct FunctionCallArgsDone {
 }
 
 /// Output item added — `response.output_item.added`
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
+#[expect(dead_code)]
 pub(crate) struct OutputItemAdded {
     /// The output item.
     pub item: OutputItem,
@@ -52,7 +53,7 @@ pub(crate) struct OutputItemAdded {
 }
 
 /// An item in the response output array.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub(crate) struct OutputItem {
     /// Item ID.
     pub id: String,
@@ -68,14 +69,15 @@ pub(crate) struct OutputItem {
 }
 
 /// Response completed — `response.completed`
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub(crate) struct ResponseCompleted {
     /// The full response object.
     pub response: ResponseObject,
 }
 
 /// The response object within a completed event.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
+#[expect(dead_code)]
 pub(crate) struct ResponseObject {
     /// Response status.
     pub status: String,
@@ -85,7 +87,7 @@ pub(crate) struct ResponseObject {
 }
 
 /// Token usage statistics.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub(crate) struct Usage {
     /// Input tokens consumed.
     pub input_tokens: usize,
