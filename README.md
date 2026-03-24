@@ -62,4 +62,4 @@ cargo build --target wasm32-wasip1 --release
 
 Dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE).
 
-Copyright (c) 2025-2026 Joshua J. Bouw and Unicity Labs.
+Copyright (c) 2026 Joshua J. Bouw and Unicity Labs.
