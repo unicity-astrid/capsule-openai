@@ -21,10 +21,12 @@
 //! For generic OpenAI-compatible providers (Groq, Together, Mistral, etc.),
 //! use `astrid-capsule-openai-compat` instead.
 
+mod models;
 mod schemas;
 
 use astrid_sdk::prelude::*;
 use astrid_sdk::types::{IpcPayload, Message, MessageContent, MessageRole, StreamEvent};
+use models::lookup;
 use schemas::ChatCompletionChunk;
 use serde_json::Value;
 use uuid::Uuid;
@@ -66,26 +68,45 @@ impl OpenAIProvider {
     }
 
     /// Returns provider metadata for IPC-based provider discovery.
+    ///
+    /// Resolves model capabilities from the built-in registry. Env vars
+    /// override registry defaults when set.
     #[astrid::interceptor("llm_describe")]
     pub fn llm_describe(&self, _payload: serde_json::Value) -> Result<serde_json::Value, SysError> {
-        let model = env::var("model").unwrap_or_else(|_| "gpt-4.1".into());
+        let model_id = env::var("model").unwrap_or_else(|_| "gpt-4.1".into());
+        let info = lookup(&model_id);
+
+        // Env vars override registry defaults.
         let context_window = env::var("context_window")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(128_000);
+            .unwrap_or(info.context_window);
         let max_output = env::var("max_output_tokens")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(8_192);
+            .unwrap_or(info.max_output_tokens);
+
+        let mut capabilities = vec!["text", "tools"];
+        if info.supports_vision {
+            capabilities.push("vision");
+        }
+        if info.supports_structured_output {
+            capabilities.push("structured_output");
+        }
+        if info.is_reasoning {
+            capabilities.push("reasoning");
+        }
+
         Ok(serde_json::json!({
             "providers": [{
                 "id": "openai",
-                "description": format!("OpenAI (default model: {model})"),
-                "capabilities": ["text", "vision", "tools", "structured_output", "reasoning"],
+                "description": format!("OpenAI {} ({})", info.name, model_id),
+                "capabilities": capabilities,
                 "request_topic": "llm.v1.request.generate.openai",
                 "stream_topic": STREAM_TOPIC,
                 "context_window": context_window,
                 "max_output_tokens": max_output,
+                "models": models::list_model_ids(),
             }]
         }))
     }
@@ -123,6 +144,8 @@ impl OpenAIProvider {
             }
         }
 
+        let info = lookup(&resolved_model);
+
         let mut request_body = serde_json::json!({
             "model": resolved_model,
             "messages": api_messages,
@@ -130,23 +153,26 @@ impl OpenAIProvider {
             "stream_options": { "include_usage": true },
         });
 
-        // max_completion_tokens — OpenAI's preferred field.
-        if let Ok(max_tokens) = env::var("max_output_tokens")
-            && let Ok(n) = max_tokens.parse::<u64>()
-            && n > 0
-        {
-            request_body["max_completion_tokens"] = serde_json::json!(n);
+        // max_completion_tokens — env override, then registry default.
+        let max_tokens = env::var("max_output_tokens")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(info.max_output_tokens);
+        if max_tokens > 0 {
+            request_body["max_completion_tokens"] = serde_json::json!(max_tokens);
         }
 
-        // Temperature.
-        if let Ok(temp) = env::var("temperature")
+        // Temperature — not supported on reasoning models.
+        if !info.is_reasoning
+            && let Ok(temp) = env::var("temperature")
             && let Ok(t) = temp.parse::<f64>()
         {
             request_body["temperature"] = serde_json::json!(t);
         }
 
-        // Reasoning effort for o-series models.
-        if let Ok(effort) = env::var("reasoning_effort")
+        // Reasoning effort — only for o-series models.
+        if info.is_reasoning
+            && let Ok(effort) = env::var("reasoning_effort")
             && !effort.is_empty()
         {
             request_body["reasoning_effort"] = serde_json::json!(effort);
@@ -181,9 +207,7 @@ impl OpenAIProvider {
 
         let api_key = env::var("api_key").unwrap_or_default();
         if api_key.is_empty() {
-            return Err(SysError::ApiError(
-                "OpenAI api_key not configured".into(),
-            ));
+            return Err(SysError::ApiError("OpenAI api_key not configured".into()));
         }
 
         let req = http::Request::post(&url)
@@ -214,10 +238,7 @@ impl OpenAIProvider {
     }
 
     /// Stream SSE chunks, publishing IPC events as they arrive.
-    fn parse_sse_stream(
-        request_id: Uuid,
-        stream: &http::HttpStreamHandle,
-    ) -> Result<(), SysError> {
+    fn parse_sse_stream(request_id: Uuid, stream: &http::HttpStreamHandle) -> Result<(), SysError> {
         let mut active_tools: Vec<(String, String)> = Vec::new();
         let mut line_buffer = String::new();
 

@@ -20,12 +20,14 @@ ipc_publish = ["llm.v1.stream.openai", "llm.v1.response.describe.*"]
 
 [env]
 api_key = { type = "secret", request = "Enter your OpenAI API key", placeholder = "sk-..." }
-model = { type = "string", request = "Enter the default model ID", default = "gpt-4.1", placeholder = "gpt-4.1" }
-context_window = { type = "integer", request = "Enter the model's context window size (tokens)", default = "128000", placeholder = "128000" }
-max_output_tokens = { type = "integer", request = "Enter the max output tokens", default = "8192", placeholder = "8192" }
+model = { type = "string", request = "Enter the model ID (gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, o3, o3-mini, o4-mini, o1, o1-mini, o1-pro, gpt-4.5-preview)", default = "gpt-4.1", placeholder = "gpt-4.1" }
 temperature = { type = "string", request = "Enter the default temperature (0.0-2.0, blank = provider default)", placeholder = "0.7" }
 reasoning_effort = { type = "string", request = "Reasoning effort for o-series models (low/medium/high, blank = default)", placeholder = "" }
 service_tier = { type = "string", request = "Service tier (auto/default/flex/priority, blank = auto)", default = "auto", placeholder = "auto" }
+# context_window and max_output_tokens are resolved from the built-in model
+# registry. Set these env vars to override registry defaults.
+# context_window = { type = "integer", request = "Override context window (tokens)", placeholder = "128000" }
+# max_output_tokens = { type = "integer", request = "Override max output tokens", placeholder = "8192" }
 
 [[interceptor]]
 event = "llm.v1.request.describe"
