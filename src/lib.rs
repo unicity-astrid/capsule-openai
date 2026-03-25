@@ -180,7 +180,7 @@ impl OpenAIProvider {
                 .iter()
                 .map(|t| {
                     let mut params = t.input_schema.clone();
-                    Self::enforce_additional_properties(&mut params);
+                    Self::enforce_strict_schema(&mut params);
                     serde_json::json!({
                         "type": "function",
                         "name": t.name,
@@ -449,16 +449,74 @@ impl OpenAIProvider {
         }
     }
 
-    /// Recursively inject `"additionalProperties": false` into every object
-    /// schema. OpenAI strict mode requires this on all objects, including
-    /// nested ones, but `schemars` does not emit it by default.
-    fn enforce_additional_properties(schema: &mut Value) {
+    /// Keywords that OpenAI strict mode does not support.
+    /// schemars may emit any of these; strip them before sending.
+    const UNSUPPORTED_KEYWORDS: &[&str] = &[
+        "$schema",
+        "default",
+        "format",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "minProperties",
+        "maxProperties",
+        "patternProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "unevaluatedItems",
+        "contains",
+        "minContains",
+        "maxContains",
+        "if",
+        "then",
+        "else",
+        "not",
+    ];
+
+    /// Recursively sanitize a JSON Schema for OpenAI strict mode.
+    ///
+    /// Strict mode requirements:
+    /// - `additionalProperties: false` on every object
+    /// - ALL properties must appear in `required`
+    /// - `oneOf`/`allOf` unsupported — convert to `anyOf`
+    /// - Various keywords unsupported — strip them
+    fn enforce_strict_schema(schema: &mut Value) {
         let Some(obj) = schema.as_object_mut() else {
             return;
         };
 
-        // If this schema has `"type": "object"` (or includes "object" in a type array),
-        // inject the constraint.
+        // Strip unsupported keywords.
+        for key in Self::UNSUPPORTED_KEYWORDS {
+            obj.remove(*key);
+        }
+
+        // Convert oneOf → anyOf (OpenAI only supports anyOf).
+        if let Some(one_of) = obj.remove("oneOf") {
+            obj.entry("anyOf").or_insert(one_of);
+        }
+
+        // Flatten allOf with a single element into the parent.
+        // Multi-element allOf: convert to anyOf as best-effort.
+        if let Some(Value::Array(all_of)) = obj.remove("allOf") {
+            if all_of.len() == 1 {
+                if let Some(Value::Object(inner)) = all_of.into_iter().next() {
+                    for (k, v) in inner {
+                        obj.entry(&k).or_insert(v);
+                    }
+                }
+            } else {
+                obj.entry("anyOf").or_insert(Value::Array(all_of));
+            }
+        }
+
         let is_object = match obj.get("type") {
             Some(Value::String(s)) => s == "object",
             Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some("object")),
@@ -466,36 +524,41 @@ impl OpenAIProvider {
         };
 
         if is_object {
+            // Inject additionalProperties: false.
             obj.entry("additionalProperties")
                 .or_insert(Value::Bool(false));
+
+            // Ensure ALL properties are in `required`.
+            if let Some(Value::Object(props)) = obj.get("properties") {
+                let all_keys: Vec<Value> = props.keys().map(|k| Value::String(k.clone())).collect();
+                obj.insert("required".to_string(), Value::Array(all_keys));
+            }
         }
 
-        // Recurse into `properties`.
+        // Recurse into properties.
         if let Some(Value::Object(props)) = obj.get_mut("properties") {
             for prop in props.values_mut() {
-                Self::enforce_additional_properties(prop);
+                Self::enforce_strict_schema(prop);
             }
         }
 
-        // Recurse into `items` (array items).
+        // Recurse into array items.
         if let Some(items) = obj.get_mut("items") {
-            Self::enforce_additional_properties(items);
+            Self::enforce_strict_schema(items);
         }
 
-        // Recurse into combinators.
-        for key in ["allOf", "anyOf", "oneOf"] {
-            if let Some(Value::Array(variants)) = obj.get_mut(key) {
-                for variant in variants.iter_mut() {
-                    Self::enforce_additional_properties(variant);
-                }
+        // Recurse into anyOf (the only combinator OpenAI supports).
+        if let Some(Value::Array(variants)) = obj.get_mut("anyOf") {
+            for variant in variants.iter_mut() {
+                Self::enforce_strict_schema(variant);
             }
         }
 
-        // Recurse into `$defs` / `definitions`.
+        // Recurse into $defs / definitions.
         for key in ["$defs", "definitions"] {
             if let Some(Value::Object(defs)) = obj.get_mut(key) {
                 for def in defs.values_mut() {
-                    Self::enforce_additional_properties(def);
+                    Self::enforce_strict_schema(def);
                 }
             }
         }
