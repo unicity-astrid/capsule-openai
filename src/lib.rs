@@ -179,11 +179,13 @@ impl OpenAIProvider {
             let api_tools: Vec<Value> = tools
                 .iter()
                 .map(|t| {
+                    let mut params = t.input_schema.clone();
+                    Self::enforce_additional_properties(&mut params);
                     serde_json::json!({
                         "type": "function",
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.input_schema,
+                        "parameters": params,
                         "strict": true,
                     })
                 })
@@ -444,6 +446,58 @@ impl OpenAIProvider {
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
             MessageRole::Tool => "tool",
+        }
+    }
+
+    /// Recursively inject `"additionalProperties": false` into every object
+    /// schema. OpenAI strict mode requires this on all objects, including
+    /// nested ones, but `schemars` does not emit it by default.
+    fn enforce_additional_properties(schema: &mut Value) {
+        let Some(obj) = schema.as_object_mut() else {
+            return;
+        };
+
+        // If this schema has `"type": "object"` (or includes "object" in a type array),
+        // inject the constraint.
+        let is_object = match obj.get("type") {
+            Some(Value::String(s)) => s == "object",
+            Some(Value::Array(arr)) => arr.iter().any(|v| v.as_str() == Some("object")),
+            _ => false,
+        };
+
+        if is_object {
+            obj.entry("additionalProperties")
+                .or_insert(Value::Bool(false));
+        }
+
+        // Recurse into `properties`.
+        if let Some(Value::Object(props)) = obj.get_mut("properties") {
+            for prop in props.values_mut() {
+                Self::enforce_additional_properties(prop);
+            }
+        }
+
+        // Recurse into `items` (array items).
+        if let Some(items) = obj.get_mut("items") {
+            Self::enforce_additional_properties(items);
+        }
+
+        // Recurse into combinators.
+        for key in ["allOf", "anyOf", "oneOf"] {
+            if let Some(Value::Array(variants)) = obj.get_mut(key) {
+                for variant in variants.iter_mut() {
+                    Self::enforce_additional_properties(variant);
+                }
+            }
+        }
+
+        // Recurse into `$defs` / `definitions`.
+        for key in ["$defs", "definitions"] {
+            if let Some(Value::Object(defs)) = obj.get_mut(key) {
+                for def in defs.values_mut() {
+                    Self::enforce_additional_properties(def);
+                }
+            }
         }
     }
 }
