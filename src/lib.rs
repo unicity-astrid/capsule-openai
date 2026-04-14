@@ -55,7 +55,7 @@ impl OpenAIProvider {
         } = req
             && let Err(e) = Self::execute_request(request_id, &model, &messages, &tools, &system)
         {
-            let _ = log::error(format!("OpenAI request failed: {e}"));
+            log::error(format!("OpenAI request failed: {e}"));
             let _ = ipc::publish_json(
                 STREAM_TOPIC,
                 &IpcPayload::LlmStreamEvent {
@@ -330,7 +330,7 @@ impl OpenAIProvider {
                 Self::publish_stream(request_id, StreamEvent::Done)?;
             }
             "response.failed" => {
-                let _ = log::error(format!("OpenAI response failed: {data}"));
+                log::error(format!("OpenAI response failed: {data}"));
                 Self::publish_stream(
                     request_id,
                     StreamEvent::Error(format!("Response failed: {data}")),
