@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "astrid-sdk"
-version = "0.5.3"
+version = "0.6.1"
 dependencies = [
  "astrid-sdk-macros",
  "astrid-sys",
@@ -39,11 +39,12 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
 name = "astrid-sdk-macros"
-version = "0.5.3"
+version = "0.6.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -53,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "astrid-sys"
-version = "0.5.3"
+version = "0.6.1"
 dependencies = [
  "serde",
  "wit-bindgen 0.54.0",

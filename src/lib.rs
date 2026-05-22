@@ -200,38 +200,37 @@ impl OpenAIProvider {
             .header("authorization", format!("Bearer {api_key}"))
             .json(&request_body)?;
 
-        let resp = http::stream_start(&req)?;
+        let stream = http::stream_start(&req)?;
 
-        if resp.status != 200 {
+        if stream.status() != 200 {
+            let status = stream.status();
             let mut error_body = String::new();
-            while let Some(chunk) = http::stream_read(&resp.handle)? {
+            while let Some(chunk) = stream.read_chunk()? {
                 error_body.push_str(&String::from_utf8_lossy(&chunk));
                 if error_body.len() > 4096 {
                     error_body.truncate(4096);
                     break;
                 }
             }
-            let _ = http::stream_close(&resp.handle);
+            // `stream` drops at end of scope, releasing the kernel-side resource.
             return Err(SysError::ApiError(format!(
-                "OpenAI API error ({}): {error_body}",
-                resp.status
+                "OpenAI API error ({status}): {error_body}"
             )));
         }
 
-        let result = Self::parse_sse_stream(request_id, &resp.handle);
-        let _ = http::stream_close(&resp.handle);
-        result
+        Self::parse_sse_stream(request_id, &stream)
+        // `stream` drops at end of scope, releasing the kernel-side resource.
     }
 
     /// Parse the Responses API SSE stream.
     ///
     /// The Responses API uses named events (`event: <type>\ndata: <json>\n\n`)
     /// instead of Chat Completions' bare `data: {json}` format.
-    fn parse_sse_stream(request_id: Uuid, stream: &http::HttpStreamHandle) -> Result<(), SysError> {
+    fn parse_sse_stream(request_id: Uuid, stream: &http::HttpStream) -> Result<(), SysError> {
         let mut line_buffer = String::new();
         let mut current_event: Option<String> = None;
 
-        while let Some(chunk) = http::stream_read(stream)? {
+        while let Some(chunk) = stream.read_chunk()? {
             let chunk_str = String::from_utf8_lossy(&chunk);
             line_buffer.push_str(&chunk_str);
 
