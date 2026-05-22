@@ -68,6 +68,12 @@ impl OpenAIProvider {
     }
 
     /// Returns provider metadata for IPC-based provider discovery.
+    ///
+    /// The registry capsule publishes `llm.v1.request.describe` and drains
+    /// `llm.v1.response.describe` for a bounded window (post-#752 replaces
+    /// the removed `hooks::trigger` fan-out). The provider must publish its
+    /// descriptor explicitly — the interceptor return value is no longer
+    /// fanned out to the caller under the new ABI.
     #[astrid::interceptor("llm_describe")]
     pub fn llm_describe(&self, _payload: serde_json::Value) -> Result<serde_json::Value, SysError> {
         let model_id = env::var("model").unwrap_or_else(|_| "gpt-5.4".into());
@@ -93,7 +99,7 @@ impl OpenAIProvider {
             capabilities.push("reasoning");
         }
 
-        Ok(serde_json::json!({
+        let response = serde_json::json!({
             "providers": [{
                 "id": "openai",
                 "description": format!("OpenAI {} ({})", info.name, model_id),
@@ -104,7 +110,9 @@ impl OpenAIProvider {
                 "max_output_tokens": max_output,
                 "models": models::list_model_ids(),
             }]
-        }))
+        });
+        ipc::publish_json("llm.v1.response.describe", &response)?;
+        Ok(response)
     }
 }
 
