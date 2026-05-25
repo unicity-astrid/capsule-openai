@@ -21,6 +21,17 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
+      # Force rustup to materialise the wasm32-unknown-unknown rust-std for
+      # the rust-toolchain.toml-pinned version (1.94.0) before cargo runs.
+      # dtolnay installs the target for the action's `toolchain:` channel
+      # (stable, currently 1.95.0). When rust-toolchain.toml then switches
+      # cargo to 1.94.0, the wasm target may not yet exist for 1.94.0 —
+      # rustup auto-install via the `targets` field is meant to cover that
+      # but races with parallel compile jobs on this repo. The explicit
+      # install removes the ambiguity.
+      - name: Install wasm32 target for pinned toolchain
+        run: rustup target add wasm32-unknown-unknown
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
