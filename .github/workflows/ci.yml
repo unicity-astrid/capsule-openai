@@ -28,6 +28,17 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
+      # Bisect-confirmed (commit 0b9e800): without this, `cargo clippy`
+      # fails with `can't find crate for 'std'` for wasm32-unknown-unknown.
+      # dtolnay's `targets:` input installs the target for its `toolchain:`
+      # channel (stable, currently 1.95.0); rust-toolchain.toml then pins
+      # cargo to exact 1.94.0, and the auto-install of `targets` from
+      # rust-toolchain.toml doesn't reliably fire before the first cargo
+      # invocation. Other capsules in this org pass without this step
+      # (likely cache-warmed), but openai consistently doesn't.
+      - name: Install wasm32 target for pinned toolchain
+        run: rustup target add wasm32-unknown-unknown
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
