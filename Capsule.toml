@@ -16,10 +16,15 @@ llm = "1.0.0"
 
 [capabilities]
 net = ["api.openai.com"]
+
+# Publish ACL: the [publish] keys are the only IPC-publish declaration.
 # Exact `llm.v1.response.describe` is what registry's post-#752 fan-out
 # subscribes to (unsuffixed). The `.*` wildcard stays for any future
 # call-site that wants per-provider response correlation routing.
-ipc_publish = ["llm.v1.stream.openai", "llm.v1.response.describe", "llm.v1.response.describe.*"]
+[publish]
+"llm.v1.stream.openai" = { wit = "@unicity-astrid/wit/llm/stream-event" }
+"llm.v1.response.describe" = { wit = "@unicity-astrid/wit/llm/describe-response" }
+"llm.v1.response.describe.*" = { wit = "@unicity-astrid/wit/llm/describe-response" }
 
 [env]
 api_key = { type = "secret", request = "Enter your OpenAI API key", placeholder = "sk-..." }
