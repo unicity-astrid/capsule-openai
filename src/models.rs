@@ -278,12 +278,15 @@ pub(crate) fn capabilities_for(info: &ModelInfo) -> Vec<String> {
 /// Build the full ordered list of provider entries for the describe response.
 ///
 /// `default_model` is the env-`model` hint (the model the registry should
-/// auto-select for this capsule). The matching entry is emitted FIRST so the
-/// registry can identify the default purely from response ordering — no WIT
-/// field is added (the `provider-entry` record has no `default` flag and is a
-/// frozen-shaped contract). If `default_model` does not match any catalog id,
-/// ordering is left as the catalog order (the registry treats entry[0] as the
-/// default hint regardless).
+/// auto-select for this capsule). It is resolved through [`lookup`] — the same
+/// prefix/snapshot-aware resolution the execute path uses — so a dated-snapshot
+/// default (e.g. `gpt-5.4-2026-03-05`) hoists its canonical catalog row
+/// (`gpt-5.4`). The matching entry is emitted FIRST so the registry can identify
+/// the default purely from response ordering — no WIT field is added (the
+/// `provider-entry` record has no `default` flag and is a frozen-shaped
+/// contract). If `default_model` does not resolve to a catalog id, ordering is
+/// left as the catalog order (the registry treats entry[0] as the default hint
+/// regardless).
 ///
 /// `request_topic` / `stream_topic` are SHARED across every entry — all models
 /// are served by the same generate/stream topics; only the model id differs.
@@ -306,10 +309,15 @@ pub(crate) fn build_provider_entries(
         .collect();
 
     // Hoist the env-default model to the front so it is the identifiable
-    // auto-select hint. Exact id match against the catalog only; an unknown
-    // default leaves the full catalog intact in catalog order.
-    if let Some(pos) = entries.iter().position(|e| e.id == default_model) {
-        entries.swap(0, pos);
+    // auto-select hint. Resolve the default through `lookup` so a dated-snapshot
+    // default (e.g. gpt-5.4-2026-03-05) hoists its canonical catalog row; an
+    // unknown default resolves to UNKNOWN_DEFAULTS (not a catalog id) and leaves
+    // the full catalog intact in catalog order. Move-to-front is STABLE so the
+    // remaining entries keep their catalog order.
+    let default_id = lookup(default_model).id;
+    if let Some(pos) = entries.iter().position(|e| e.id == default_id) {
+        let entry = entries.remove(pos);
+        entries.insert(0, entry);
     }
 
     entries
@@ -369,11 +377,51 @@ mod tests {
     }
 
     #[test]
-    fn unknown_default_model_leaves_catalog_order() {
-        let entries = build_provider_entries("does-not-exist", REQUEST_TOPIC, STREAM_TOPIC);
-        assert_eq!(entries[0].id, MODELS[0].id);
+    fn dated_snapshot_default_hoists_canonical_catalog_id() {
+        // A dated-snapshot default resolves via `lookup` (prefix match) to its
+        // canonical catalog row, which is the id that must be hoisted first.
+        let entries = build_provider_entries("gpt-5.4-2026-03-05", REQUEST_TOPIC, STREAM_TOPIC);
         assert_eq!(entries[0].id, "gpt-5.4");
         assert_eq!(entries.len(), MODELS.len());
+
+        // A non-frontier dated snapshot hoists its own canonical row, not the
+        // catalog head.
+        let entries = build_provider_entries("o4-mini-2025-04-16", REQUEST_TOPIC, STREAM_TOPIC);
+        assert_eq!(entries[0].id, "o4-mini");
+        assert_eq!(entries.len(), MODELS.len());
+    }
+
+    #[test]
+    fn move_to_front_is_stable_preserving_catalog_order() {
+        // Hoisting a mid-catalog default must be a STABLE move-to-front: the
+        // default leads, every other entry keeps its relative catalog order
+        // (no swap-induced scrambling of the old head).
+        let default_id = "o3-mini";
+        let entries = build_provider_entries(default_id, REQUEST_TOPIC, STREAM_TOPIC);
+        assert_eq!(entries[0].id, default_id);
+
+        let expected_tail: Vec<&str> = MODELS
+            .iter()
+            .map(|m| m.id)
+            .filter(|id| *id != default_id)
+            .collect();
+        let actual_tail: Vec<&str> = entries[1..].iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            actual_tail, expected_tail,
+            "non-default entries must keep catalog order after a stable move-to-front"
+        );
+    }
+
+    #[test]
+    fn unknown_default_model_leaves_catalog_order() {
+        let entries = build_provider_entries("does-not-exist", REQUEST_TOPIC, STREAM_TOPIC);
+        let expected: Vec<&str> = MODELS.iter().map(|m| m.id).collect();
+        let actual: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            actual, expected,
+            "an unknown default must leave the full catalog in catalog order"
+        );
+        assert_eq!(entries[0].id, "gpt-5.4");
     }
 
     #[test]
