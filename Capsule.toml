@@ -28,7 +28,7 @@ net = ["api.openai.com"]
 
 [env]
 api_key = { type = "secret", request = "Enter your OpenAI API key", placeholder = "sk-..." }
-model = { type = "string", request = "Enter the model ID (gpt-5.4, gpt-5.4-mini, gpt-5.4-nano, gpt-5.3, gpt-5.3-codex, gpt-5.2, gpt-5.2-codex, gpt-4.1, gpt-4.1-mini, o4-mini, o3, o3-mini)", default = "gpt-5.4", placeholder = "gpt-5.4" }
+model = { type = "string", request = "Default model to select (any catalog model is selectable later)", default = "gpt-5.4", placeholder = "gpt-5.4" }
 temperature = { type = "string", request = "Enter the default temperature (0.0-2.0, blank = provider default)", placeholder = "0.7" }
 reasoning_effort = { type = "string", request = "Reasoning effort for o-series models (low/medium/high, blank = default)", placeholder = "" }
 service_tier = { type = "string", request = "Service tier (auto/default/flex/priority, blank = auto)", default = "auto", placeholder = "auto" }

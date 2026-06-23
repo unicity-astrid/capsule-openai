@@ -9,6 +9,8 @@
 //! - https://developers.openai.com/api/docs/models/gpt-5.4
 //! - https://developers.openai.com/api/docs/models/gpt-5.2
 
+use serde::Serialize;
+
 /// Known OpenAI model capabilities.
 #[derive(Debug, Clone, Copy)]
 #[expect(dead_code, reason = "registry fields used as capabilities expand")]
@@ -234,7 +236,209 @@ pub(crate) fn lookup(model_id: &str) -> &'static ModelInfo {
     &UNKNOWN_DEFAULTS
 }
 
-/// List all known model IDs for display purposes.
-pub(crate) fn list_model_ids() -> Vec<&'static str> {
-    MODELS.iter().map(|m| m.id).collect()
+/// One selectable model, shaped to the `provider-entry` WIT record
+/// (`unicity-astrid/wit` `interfaces/registry.wit`). Serialized to JSON and
+/// carried in the `describe-response.providers` array. Field names match the
+/// WIT record exactly so the registry deserializes it directly.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct ProviderEntry {
+    /// MODEL id (e.g. "gpt-5.4"). Per registry.wit this is a model id, not the
+    /// provider/capsule name.
+    pub id: String,
+    /// Human-readable summary (e.g. "OpenAI GPT-5.4 Mini").
+    pub description: String,
+    /// Topic the registry routes generate requests to for this provider.
+    pub request_topic: String,
+    /// Topic this provider streams responses on.
+    pub stream_topic: String,
+    /// Capability tags derived from the model's catalog flags.
+    pub capabilities: Vec<String>,
+    /// Maximum context window in tokens for this model.
+    pub context_window: u64,
+    /// Default max output tokens for this model.
+    pub max_output_tokens: u64,
+}
+
+/// Capability list derived from a model's catalog flags. "text" and "tools"
+/// are always present (every catalog model has `supports_tools: true`).
+pub(crate) fn capabilities_for(info: &ModelInfo) -> Vec<String> {
+    let mut caps = vec!["text".to_string(), "tools".to_string()];
+    if info.supports_vision {
+        caps.push("vision".to_string());
+    }
+    if info.supports_structured_output {
+        caps.push("structured_output".to_string());
+    }
+    if info.is_reasoning {
+        caps.push("reasoning".to_string());
+    }
+    caps
+}
+
+/// Build the full ordered list of provider entries for the describe response.
+///
+/// `default_model` is the env-`model` hint (the model the registry should
+/// auto-select for this capsule). The matching entry is emitted FIRST so the
+/// registry can identify the default purely from response ordering — no WIT
+/// field is added (the `provider-entry` record has no `default` flag and is a
+/// frozen-shaped contract). If `default_model` does not match any catalog id,
+/// ordering is left as the catalog order (the registry treats entry[0] as the
+/// default hint regardless).
+///
+/// `request_topic` / `stream_topic` are SHARED across every entry — all models
+/// are served by the same generate/stream topics; only the model id differs.
+pub(crate) fn build_provider_entries(
+    default_model: &str,
+    request_topic: &str,
+    stream_topic: &str,
+) -> Vec<ProviderEntry> {
+    let mut entries: Vec<ProviderEntry> = MODELS
+        .iter()
+        .map(|info| ProviderEntry {
+            id: info.id.to_string(),
+            description: format!("OpenAI {}", info.name),
+            request_topic: request_topic.to_string(),
+            stream_topic: stream_topic.to_string(),
+            capabilities: capabilities_for(info),
+            context_window: info.context_window,
+            max_output_tokens: info.max_output_tokens,
+        })
+        .collect();
+
+    // Hoist the env-default model to the front so it is the identifiable
+    // auto-select hint. Exact id match against the catalog only; an unknown
+    // default leaves the full catalog intact in catalog order.
+    if let Some(pos) = entries.iter().position(|e| e.id == default_model) {
+        entries.swap(0, pos);
+    }
+
+    entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REQUEST_TOPIC: &str = "llm.v1.request.generate.openai";
+    const STREAM_TOPIC: &str = "llm.v1.stream.openai";
+
+    #[test]
+    fn describe_emits_one_entry_per_catalog_model() {
+        let entries = build_provider_entries("gpt-5.4", REQUEST_TOPIC, STREAM_TOPIC);
+        assert_eq!(entries.len(), MODELS.len());
+    }
+
+    #[test]
+    fn entry_ids_are_model_ids_never_provider_name() {
+        let entries = build_provider_entries("gpt-5.4", REQUEST_TOPIC, STREAM_TOPIC);
+
+        let catalog_ids: std::collections::HashSet<&str> = MODELS.iter().map(|m| m.id).collect();
+        for entry in &entries {
+            assert_ne!(
+                entry.id, "openai",
+                "provider name must never be an entry id"
+            );
+            assert!(
+                catalog_ids.contains(entry.id.as_str()),
+                "entry id {} is not a catalog model id",
+                entry.id
+            );
+        }
+
+        let entry_ids: std::collections::HashSet<&str> =
+            entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(entry_ids, catalog_ids, "entry ids must equal catalog ids");
+    }
+
+    #[test]
+    fn all_entries_share_request_and_stream_topics() {
+        let entries = build_provider_entries("gpt-5.4", REQUEST_TOPIC, STREAM_TOPIC);
+        for entry in &entries {
+            assert_eq!(entry.request_topic, REQUEST_TOPIC);
+            assert_eq!(entry.stream_topic, STREAM_TOPIC);
+        }
+    }
+
+    #[test]
+    fn default_model_is_first_entry() {
+        let entries = build_provider_entries("o3-mini", REQUEST_TOPIC, STREAM_TOPIC);
+        assert_eq!(entries[0].id, "o3-mini");
+
+        let entries = build_provider_entries("gpt-5.4", REQUEST_TOPIC, STREAM_TOPIC);
+        assert_eq!(entries[0].id, "gpt-5.4");
+    }
+
+    #[test]
+    fn unknown_default_model_leaves_catalog_order() {
+        let entries = build_provider_entries("does-not-exist", REQUEST_TOPIC, STREAM_TOPIC);
+        assert_eq!(entries[0].id, MODELS[0].id);
+        assert_eq!(entries[0].id, "gpt-5.4");
+        assert_eq!(entries.len(), MODELS.len());
+    }
+
+    #[test]
+    fn capabilities_differ_per_model_where_catalog_says_so() {
+        let entries = build_provider_entries("gpt-5.4", REQUEST_TOPIC, STREAM_TOPIC);
+        let cap_of = |id: &str| -> Vec<String> {
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("missing entry {id}"))
+                .capabilities
+                .clone()
+        };
+
+        // o3-mini lacks vision; gpt-5.4 has it.
+        assert!(!cap_of("o3-mini").contains(&"vision".to_string()));
+        assert!(cap_of("gpt-5.4").contains(&"vision".to_string()));
+
+        // gpt-5.3 is not a reasoning model; o3 is.
+        assert!(!cap_of("gpt-5.3").contains(&"reasoning".to_string()));
+        assert!(cap_of("o3").contains(&"reasoning".to_string()));
+    }
+
+    #[test]
+    fn context_window_and_max_output_match_catalog_row() {
+        let entries = build_provider_entries("gpt-5.4", REQUEST_TOPIC, STREAM_TOPIC);
+        let entry_of = |id: &str| -> &ProviderEntry {
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .unwrap_or_else(|| panic!("missing entry {id}"))
+        };
+
+        let gpt54 = entry_of("gpt-5.4");
+        assert_eq!(gpt54.context_window, 1_050_000);
+        assert_eq!(gpt54.max_output_tokens, 128_000);
+
+        let gpt4o = entry_of("gpt-4o");
+        assert_eq!(gpt4o.context_window, 128_000);
+        assert_eq!(gpt4o.max_output_tokens, 16_384);
+    }
+
+    #[test]
+    fn provider_entry_serializes_with_wit_field_names() {
+        let entries = build_provider_entries("gpt-5.4", REQUEST_TOPIC, STREAM_TOPIC);
+        let value = serde_json::to_value(&entries[0]).expect("entry serializes");
+        let obj = value.as_object().expect("entry is a JSON object");
+
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "capabilities",
+                "context_window",
+                "description",
+                "id",
+                "max_output_tokens",
+                "request_topic",
+                "stream_topic",
+            ]
+        );
+        assert!(
+            !obj.contains_key("models"),
+            "ad-hoc `models` field must not be serialized"
+        );
+    }
 }

@@ -76,41 +76,17 @@ impl OpenAIProvider {
     /// fanned out to the caller under the new ABI.
     #[astrid::interceptor("llm_describe")]
     pub fn llm_describe(&self, _payload: serde_json::Value) -> Result<serde_json::Value, SysError> {
-        let model_id = env::var("model").unwrap_or_else(|_| "gpt-5.4".into());
-        let info = lookup(&model_id);
+        // The env `model` is the *default selection* hint, not the only usable
+        // model: every catalog model is advertised as its own selectable entry.
+        let default_model = env::var("model").unwrap_or_else(|_| "gpt-5.4".into());
 
-        let context_window = env::var("context_window")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(info.context_window);
-        let max_output = env::var("max_output_tokens")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(info.max_output_tokens);
+        let entries = models::build_provider_entries(
+            &default_model,
+            "llm.v1.request.generate.openai",
+            STREAM_TOPIC,
+        );
 
-        let mut capabilities = vec!["text", "tools"];
-        if info.supports_vision {
-            capabilities.push("vision");
-        }
-        if info.supports_structured_output {
-            capabilities.push("structured_output");
-        }
-        if info.is_reasoning {
-            capabilities.push("reasoning");
-        }
-
-        let response = serde_json::json!({
-            "providers": [{
-                "id": "openai",
-                "description": format!("OpenAI {} ({})", info.name, model_id),
-                "capabilities": capabilities,
-                "request_topic": "llm.v1.request.generate.openai",
-                "stream_topic": STREAM_TOPIC,
-                "context_window": context_window,
-                "max_output_tokens": max_output,
-                "models": models::list_model_ids(),
-            }]
-        });
+        let response = serde_json::json!({ "providers": entries });
         ipc::publish_json("llm.v1.response.describe", &response)?;
         Ok(response)
     }
