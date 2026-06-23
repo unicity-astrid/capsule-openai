@@ -127,6 +127,23 @@ impl OpenAIProvider {
         }
     }
 
+    /// Resolve the request base URL from the `base_url` env (defaulting to the
+    /// [`BASE_URL`] const when unset), normalized via [`normalize_base_url`].
+    ///
+    /// Single source of truth for the endpoint so discovery (`/v1/models`) and
+    /// generation (`/v1/responses`) always hit the SAME host: a configured
+    /// proxy/Azure `base_url` must not split traffic between the two paths.
+    fn resolve_base_url() -> String {
+        Self::normalize_base_url(&env::var("base_url").unwrap_or_else(|_| BASE_URL.into()))
+    }
+
+    /// Pure normalization of a configured base URL: strip any trailing slash so
+    /// `{base}/v1/...` never doubles the separator. Split from [`resolve_base_url`]
+    /// so the endpoint-building invariant is unit-testable without a host env.
+    fn normalize_base_url(raw: &str) -> String {
+        raw.trim_end_matches('/').to_string()
+    }
+
     /// Query `GET {base_url}/v1/models` and return the discovered model ids.
     ///
     /// Returns `Ok(Vec)` with **at least one** id on success. Any failure
@@ -136,8 +153,7 @@ impl OpenAIProvider {
     /// hard error here — OpenAI rejects keyless `/v1/models` with a non-2xx,
     /// which funnels to the same fallback.
     fn discover_models() -> Result<Vec<String>, SysError> {
-        let base_url = env::var("base_url").unwrap_or_else(|_| BASE_URL.into());
-        let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+        let url = format!("{}/v1/models", Self::resolve_base_url());
 
         let mut req = http::Request::get(&url);
         // Only send `Authorization` when the key has non-whitespace content, and
@@ -187,7 +203,11 @@ impl OpenAIProvider {
         tools: &[astrid_sdk::types::LlmToolDefinition],
         system: &str,
     ) -> Result<(), SysError> {
-        let url = format!("{BASE_URL}/v1/responses");
+        // Resolve `base_url` from env (defaulting to BASE_URL) through the same
+        // helper `discover_models` uses, so discovery and generation hit the SAME
+        // endpoint. Without this a configured proxy/Azure `base_url` is used for
+        // /v1/models discovery while generation silently goes to api.openai.com.
+        let url = format!("{}/v1/responses", Self::resolve_base_url());
 
         let resolved_model = if model.is_empty() {
             env::var("model").unwrap_or_else(|_| DEFAULT_MODEL.into())
@@ -261,13 +281,16 @@ impl OpenAIProvider {
             request_body["tools"] = Value::Array(api_tools);
         }
 
-        let api_key = env::var("api_key").unwrap_or_default();
-        if api_key.is_empty() {
+        // Use the shared `bearer_header` so the generation path trims the key
+        // identically to discovery (`discover_models`). Without this, a key with
+        // trailing whitespace lets discovery succeed (it trims) while generation
+        // sends `Bearer <key>\n` and fails. A blank/whitespace-only key is keyless.
+        let Some(auth_value) = Self::bearer_header(&env::var("api_key").unwrap_or_default()) else {
             return Err(SysError::ApiError("OpenAI api_key not configured".into()));
-        }
+        };
 
         let req = http::Request::post(&url)
-            .header("authorization", format!("Bearer {api_key}"))
+            .header("authorization", auth_value)
             .json(&request_body)?;
 
         let stream = http::stream_start(&req)?;
@@ -519,7 +542,55 @@ impl OpenAIProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_MODEL, ModelList, OpenAIProvider, REQUEST_TOPIC, STREAM_TOPIC, models};
+    use super::{
+        BASE_URL, DEFAULT_MODEL, ModelList, OpenAIProvider, REQUEST_TOPIC, STREAM_TOPIC, models,
+    };
+
+    #[test]
+    fn discovery_and_generation_share_one_base_url() {
+        // Regression: discovery read `base_url` from env but generation hardcoded
+        // the `BASE_URL` const, so a configured proxy/Azure endpoint split traffic
+        // (discovery hit the proxy, generation silently hit api.openai.com). Both
+        // paths must build their URL from the SAME normalized base.
+        let proxy = "https://proxy.example.com/";
+        let base = OpenAIProvider::normalize_base_url(proxy);
+        let models_url = format!("{base}/v1/models");
+        let responses_url = format!("{base}/v1/responses");
+        // Same host for both routes — no trailing-slash doubling, no api.openai.com.
+        assert_eq!(models_url, "https://proxy.example.com/v1/models");
+        assert_eq!(responses_url, "https://proxy.example.com/v1/responses");
+        assert!(!responses_url.contains("api.openai.com"));
+    }
+
+    #[test]
+    fn normalize_base_url_defaults_and_strips_trailing_slash() {
+        // The const default is normalized identically to a configured value.
+        assert_eq!(OpenAIProvider::normalize_base_url(BASE_URL), BASE_URL);
+        assert_eq!(
+            OpenAIProvider::normalize_base_url("https://api.openai.com/"),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            OpenAIProvider::normalize_base_url("https://api.openai.com"),
+            "https://api.openai.com"
+        );
+    }
+
+    #[test]
+    fn generation_auth_trims_key_like_discovery() {
+        // Regression: discovery built its header via `bearer_header` (which trims)
+        // while generation used the RAW `api_key` env, so a key with trailing
+        // whitespace let discovery succeed but generation send `Bearer <key>\n`
+        // and fail. Both paths now route through `bearer_header`, so a whitespace-
+        // padded key yields an identical trimmed header on the generation path.
+        assert_eq!(
+            OpenAIProvider::bearer_header("  sk-live-xyz \n"),
+            Some("Bearer sk-live-xyz".to_string())
+        );
+        // And a whitespace-only key is keyless on BOTH paths (generation returns
+        // the "not configured" error rather than sending `Bearer <ws>`).
+        assert_eq!(OpenAIProvider::bearer_header(" \t\n "), None);
+    }
 
     #[test]
     fn extract_model_ids_parses_dedups_and_drops_blanks() {

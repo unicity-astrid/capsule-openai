@@ -5,7 +5,10 @@
 //! feature flags) keyed by id, plus the offline/keyless fallback list when the
 //! live query is unavailable. It does not need to be exhaustive — the frontier
 //! and common families suffice; unknown ids resolve to conservative defaults.
-//! Env vars override the resolved per-model defaults when set.
+//!
+//! This module is a pure capability catalog and provider-entry builder: it reads
+//! no environment and applies no overrides. Env-driven overrides (model selection,
+//! `max_output_tokens`, etc.) are applied by the request path in `lib.rs`.
 //!
 //! Last updated: 2026-06-23. Sources:
 //! - https://developers.openai.com/api/docs/models
