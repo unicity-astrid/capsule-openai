@@ -28,7 +28,7 @@ net = ["api.openai.com"]
 
 [env]
 api_key = { type = "secret", request = "Enter your OpenAI API key", placeholder = "sk-..." }
-model = { type = "string", request = "Default model to select (any live or catalog model is selectable later)", default = "gpt-5.5", placeholder = "gpt-5.5" }
+model = { type = "select", request = "Default model to select (any live or catalog model is selectable later)", default = "gpt-5.5", placeholder = "gpt-5.5", options_from = { http = "{base_url}/v1/models", bearer = "{api_key}", select = "data[].id", after = ["base_url", "api_key"] } }
 temperature = { type = "string", request = "Enter the default temperature (0.0-2.0, blank = provider default)", placeholder = "0.7" }
 reasoning_effort = { type = "string", request = "Reasoning effort for o-series models (low/medium/high, blank = default)", placeholder = "" }
 service_tier = { type = "string", request = "Service tier (auto/default/flex/priority, blank = auto)", default = "auto", placeholder = "auto" }
