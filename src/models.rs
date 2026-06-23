@@ -13,7 +13,6 @@ use serde::Serialize;
 
 /// Known OpenAI model capabilities.
 #[derive(Debug, Clone, Copy)]
-#[expect(dead_code, reason = "registry fields used as capabilities expand")]
 pub(crate) struct ModelInfo {
     /// Model identifier as used in the API.
     pub id: &'static str,
@@ -220,16 +219,26 @@ const UNKNOWN_DEFAULTS: ModelInfo = ModelInfo {
 
 /// Look up a model by ID. Returns conservative defaults for unknown models.
 ///
-/// Matches exact IDs first, then tries prefix matching for dated snapshots
-/// (e.g., `gpt-5.4-2026-03-05` matches `gpt-5.4`).
+/// Matches exact IDs first, then falls back to the LONGEST matching prefix for
+/// dated snapshots (e.g., `gpt-5.4-2026-03-05` matches `gpt-5.4`). Longest-match
+/// wins so an overlapping-prefix snapshot resolves to the most specific catalog
+/// row — `gpt-5.4-mini-2026-03-05` must match `gpt-5.4-mini`, not the shorter
+/// `gpt-5.4` that happens to be declared first.
 pub(crate) fn lookup(model_id: &str) -> &'static ModelInfo {
     // Exact match.
     if let Some(info) = MODELS.iter().find(|m| m.id == model_id) {
         return info;
     }
 
-    // Prefix match for dated snapshots (e.g., gpt-5.4-2026-03-05 → gpt-5.4).
-    if let Some(info) = MODELS.iter().find(|m| model_id.starts_with(m.id)) {
+    // Longest-prefix match for dated snapshots. Catalog declaration order is NOT
+    // a reliable specificity order (`gpt-5.4` precedes `gpt-5.4-mini`), so we
+    // pick the prefix that consumes the most of the model id rather than the
+    // first one that matches.
+    if let Some(info) = MODELS
+        .iter()
+        .filter(|m| model_id.starts_with(m.id))
+        .max_by_key(|m| m.id.len())
+    {
         return info;
     }
 
@@ -259,10 +268,14 @@ pub(crate) struct ProviderEntry {
     pub max_output_tokens: u64,
 }
 
-/// Capability list derived from a model's catalog flags. "text" and "tools"
-/// are always present (every catalog model has `supports_tools: true`).
+/// Capability list derived from a model's catalog flags. "text" is always
+/// present; every other tag is gated on the model's own flag so a future
+/// non-tools (or non-vision/structured/reasoning) model advertises correctly.
 pub(crate) fn capabilities_for(info: &ModelInfo) -> Vec<String> {
-    let mut caps = vec!["text".to_string(), "tools".to_string()];
+    let mut caps = vec!["text".to_string()];
+    if info.supports_tools {
+        caps.push("tools".to_string());
+    }
     if info.supports_vision {
         caps.push("vision".to_string());
     }
@@ -329,6 +342,61 @@ mod tests {
 
     const REQUEST_TOPIC: &str = "llm.v1.request.generate.openai";
     const STREAM_TOPIC: &str = "llm.v1.stream.openai";
+
+    #[test]
+    fn lookup_exact_match_wins() {
+        // An exact id always resolves to its own row, never a prefix.
+        assert_eq!(lookup("gpt-5.4").id, "gpt-5.4");
+        assert_eq!(lookup("gpt-5.4-mini").id, "gpt-5.4-mini");
+        assert_eq!(lookup("gpt-5.3-codex-spark").id, "gpt-5.3-codex-spark");
+    }
+
+    #[test]
+    fn lookup_prefers_longest_matching_prefix() {
+        // Overlapping prefixes: `gpt-5.4` is declared BEFORE `gpt-5.4-mini`, so a
+        // first-match prefix search would wrongly resolve a mini snapshot to the
+        // base model. Longest-match-wins must pick the most specific row.
+        assert_eq!(lookup("gpt-5.4-mini-2026-03-05").id, "gpt-5.4-mini");
+        assert_eq!(lookup("gpt-5.4-nano-2026-03-05").id, "gpt-5.4-nano");
+
+        // Three-level overlap: `gpt-5.3` ⊂ `gpt-5.3-codex` ⊂ `gpt-5.3-codex-spark`.
+        // A dated `gpt-5.3-codex` snapshot must resolve to `gpt-5.3-codex`, not the
+        // shorter `gpt-5.3`; a `gpt-5.3-codex-spark` snapshot to the longest row.
+        assert_eq!(lookup("gpt-5.3-codex-2026-01-01").id, "gpt-5.3-codex");
+        assert_eq!(
+            lookup("gpt-5.3-codex-spark-2026-01-01").id,
+            "gpt-5.3-codex-spark"
+        );
+
+        // The base model still resolves for its own dated snapshot.
+        assert_eq!(lookup("gpt-5.4-2026-03-05").id, "gpt-5.4");
+        assert_eq!(lookup("gpt-4.1-mini-2025-04-14").id, "gpt-4.1-mini");
+    }
+
+    #[test]
+    fn lookup_unknown_falls_back_to_defaults() {
+        assert_eq!(lookup("does-not-exist").id, UNKNOWN_DEFAULTS.id);
+    }
+
+    #[test]
+    fn capabilities_respect_supports_tools_flag() {
+        // A catalog model with tools advertises the "tools" capability.
+        let with_tools = ModelInfo {
+            supports_tools: true,
+            ..UNKNOWN_DEFAULTS
+        };
+        assert!(capabilities_for(&with_tools).contains(&"tools".to_string()));
+
+        // A model without tools must NOT advertise "tools" — the field is
+        // respected, not hardcoded. "text" remains unconditionally present.
+        let no_tools = ModelInfo {
+            supports_tools: false,
+            ..UNKNOWN_DEFAULTS
+        };
+        let caps = capabilities_for(&no_tools);
+        assert!(!caps.contains(&"tools".to_string()));
+        assert!(caps.contains(&"text".to_string()));
+    }
 
     #[test]
     fn describe_emits_one_entry_per_catalog_model() {
