@@ -1,10 +1,13 @@
-//! OpenAI model registry — static lookup table for model capabilities.
+//! OpenAI model registry — static capability catalog.
 //!
-//! Users select a model ID and the capsule resolves context window,
-//! max output tokens, and feature flags automatically. Env vars
-//! override these defaults when set.
+//! The LIVE `GET /v1/models` API is the authority for *which* models exist;
+//! this catalog is capability-enrichment (context window, max output tokens,
+//! feature flags) keyed by id, plus the offline/keyless fallback list when the
+//! live query is unavailable. It does not need to be exhaustive — the frontier
+//! and common families suffice; unknown ids resolve to conservative defaults.
+//! Env vars override the resolved per-model defaults when set.
 //!
-//! Last updated: 2026-03-25. Sources:
+//! Last updated: 2026-06-23. Sources:
 //! - https://developers.openai.com/api/docs/models
 //! - https://developers.openai.com/api/docs/models/gpt-5.4
 //! - https://developers.openai.com/api/docs/models/gpt-5.2
@@ -37,7 +40,28 @@ pub(crate) struct ModelInfo {
 /// Update this table when OpenAI releases new models.
 /// Unknown models fall back to conservative defaults via [`lookup`].
 pub(crate) static MODELS: &[ModelInfo] = &[
-    // ── GPT-5.4 series (March 2026, current frontier) ────────────
+    // ── GPT-5.5 series (June 2026, current frontier) ─────────────
+    ModelInfo {
+        id: "gpt-5.5",
+        name: "GPT-5.5",
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: true, // supports effort: none/low/medium/high/xhigh
+    },
+    ModelInfo {
+        id: "gpt-5.5-codex",
+        name: "GPT-5.5 Codex",
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        supports_vision: true,
+        supports_tools: true,
+        supports_structured_output: true,
+        is_reasoning: true,
+    },
+    // ── GPT-5.4 series (March 2026) ──────────────────────────────
     ModelInfo {
         id: "gpt-5.4",
         name: "GPT-5.4",
@@ -336,6 +360,76 @@ pub(crate) fn build_provider_entries(
     entries
 }
 
+/// Build provider entries from a LIVE `/v1/models` id list, ENRICHED from the
+/// catalog.
+///
+/// Each live id is resolved through [`lookup`] (exact, then longest-prefix) to
+/// borrow its capability flags + context window + max output tokens. An id that
+/// is NOT in the catalog resolves to [`UNKNOWN_DEFAULTS`] (conservative) and is
+/// named after the id itself (`OpenAI <id>`) rather than the generic
+/// `Unknown Model`, so the live list stays self-describing. A catalog id keeps
+/// its curated display name.
+///
+/// The configured `default_model` is always `entry[0]`: if it is present in the
+/// live list it is hoisted (stable move-to-front, the rest keep server order);
+/// if it is absent it is PREPENDED as its own enriched entry, so the operator's
+/// configured default is always selectable and first even when the upstream
+/// catalogue does not advertise it.
+///
+/// Live ids are deduplicated stably (server order preserved) before any
+/// hoist/prepend, and a default-prepend never produces a duplicate of an id
+/// already present. `request_topic`/`stream_topic` are SHARED across every
+/// entry — only the model id differs.
+pub(crate) fn build_live_entries(
+    live_ids: &[String],
+    default_model: &str,
+    request_topic: &str,
+    stream_topic: &str,
+) -> Vec<ProviderEntry> {
+    let make_entry = |id: &str| -> ProviderEntry {
+        let info = lookup(id);
+        // A catalog hit keeps its curated display name; a miss (UNKNOWN_DEFAULTS)
+        // is named after the live id itself, never the generic "Unknown Model".
+        let description = if info.id == UNKNOWN_DEFAULTS.id {
+            format!("OpenAI {id}")
+        } else {
+            format!("OpenAI {}", info.name)
+        };
+        ProviderEntry {
+            id: id.to_string(),
+            description,
+            request_topic: request_topic.to_string(),
+            stream_topic: stream_topic.to_string(),
+            capabilities: capabilities_for(info),
+            context_window: info.context_window,
+            max_output_tokens: info.max_output_tokens,
+        }
+    };
+
+    // Stable dedup of the live ids, preserving server order, dropping blanks —
+    // a defensive second line behind the discovery-side extraction.
+    let mut seen = std::collections::HashSet::new();
+    let mut ordered: Vec<String> = live_ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+
+    // Hoist (or prepend) the configured default so it is always entry[0].
+    let trimmed_default = default_model.trim();
+    if !trimmed_default.is_empty() {
+        if let Some(pos) = ordered.iter().position(|id| id == trimmed_default) {
+            let id = ordered.remove(pos);
+            ordered.insert(0, id);
+        } else {
+            ordered.insert(0, trimmed_default.to_string());
+        }
+    }
+
+    ordered.iter().map(|id| make_entry(id)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,8 +494,165 @@ mod tests {
 
     #[test]
     fn describe_emits_one_entry_per_catalog_model() {
-        let entries = build_provider_entries("gpt-5.4", REQUEST_TOPIC, STREAM_TOPIC);
+        let entries = build_provider_entries("gpt-5.5", REQUEST_TOPIC, STREAM_TOPIC);
         assert_eq!(entries.len(), MODELS.len());
+    }
+
+    #[test]
+    fn gpt_5_5_is_in_catalog_as_frontier_head_and_default() {
+        // The new frontier sits at the catalog HEAD and is the default-hoisted
+        // entry (it is already first, so the hoist is a no-op that still leads).
+        assert_eq!(MODELS[0].id, "gpt-5.5");
+        assert_eq!(lookup("gpt-5.5").id, "gpt-5.5");
+        assert_eq!(lookup("gpt-5.5-codex").id, "gpt-5.5-codex");
+
+        let entries = build_provider_entries("gpt-5.5", REQUEST_TOPIC, STREAM_TOPIC);
+        assert_eq!(entries[0].id, "gpt-5.5");
+        // gpt-5.5 carries the frontier capability set + lengths.
+        let g = &entries[0];
+        assert_eq!(g.context_window, 1_050_000);
+        assert_eq!(g.max_output_tokens, 128_000);
+        assert!(g.capabilities.contains(&"reasoning".to_string()));
+        assert!(g.capabilities.contains(&"vision".to_string()));
+    }
+
+    #[test]
+    fn live_entry_for_catalog_id_is_enriched_from_catalog() {
+        // A live id that IS in the catalog borrows its caps + lengths + curated
+        // display name — not the conservative unknown defaults.
+        let entries = build_live_entries(
+            &["gpt-5.5".to_string()],
+            "gpt-5.5",
+            REQUEST_TOPIC,
+            STREAM_TOPIC,
+        );
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.id, "gpt-5.5");
+        assert_eq!(e.description, "OpenAI GPT-5.5");
+        assert_eq!(e.context_window, 1_050_000);
+        assert_eq!(e.max_output_tokens, 128_000);
+        assert!(e.capabilities.contains(&"vision".to_string()));
+        assert!(e.capabilities.contains(&"reasoning".to_string()));
+        assert_eq!(e.request_topic, REQUEST_TOPIC);
+        assert_eq!(e.stream_topic, STREAM_TOPIC);
+    }
+
+    #[test]
+    fn live_entry_for_dated_snapshot_enriches_via_prefix() {
+        // A live dated-snapshot id resolves through longest-prefix lookup to its
+        // canonical catalog row's caps/lengths, while KEEPING the live id verbatim.
+        let entries = build_live_entries(
+            &["gpt-5.4-mini-2026-03-05".to_string()],
+            "gpt-5.5",
+            REQUEST_TOPIC,
+            STREAM_TOPIC,
+        );
+        // Default (gpt-5.5) is prepended first; the snapshot is the second entry.
+        let snap = entries
+            .iter()
+            .find(|e| e.id == "gpt-5.4-mini-2026-03-05")
+            .expect("snapshot entry present");
+        // gpt-5.4-mini caps/lengths.
+        assert_eq!(snap.context_window, 400_000);
+        assert_eq!(snap.max_output_tokens, 128_000);
+        assert_eq!(snap.description, "OpenAI GPT-5.4 Mini");
+    }
+
+    #[test]
+    fn live_entry_for_unknown_id_uses_conservative_defaults_and_id_name() {
+        // A live id NOT in the catalog falls back to UNKNOWN_DEFAULTS for caps +
+        // lengths, and is named after the id itself, never "Unknown Model".
+        let entries = build_live_entries(
+            &["gpt-9-experimental".to_string()],
+            "gpt-9-experimental",
+            REQUEST_TOPIC,
+            STREAM_TOPIC,
+        );
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.id, "gpt-9-experimental");
+        assert_eq!(e.description, "OpenAI gpt-9-experimental");
+        assert_eq!(e.context_window, UNKNOWN_DEFAULTS.context_window);
+        assert_eq!(e.max_output_tokens, UNKNOWN_DEFAULTS.max_output_tokens);
+        // Conservative: no vision, no structured_output, no reasoning; tools+text.
+        assert!(e.capabilities.contains(&"text".to_string()));
+        assert!(e.capabilities.contains(&"tools".to_string()));
+        assert!(!e.capabilities.contains(&"vision".to_string()));
+        assert!(!e.capabilities.contains(&"reasoning".to_string()));
+        // Never the generic catalog fallback name.
+        assert_ne!(e.description, format!("OpenAI {}", UNKNOWN_DEFAULTS.name));
+    }
+
+    #[test]
+    fn live_default_present_is_hoisted_first_preserving_server_order() {
+        // The configured default appears mid-list; it must lead, and the rest
+        // keep their server (discovered) order.
+        let live = vec![
+            "a-model".to_string(),
+            "the-default".to_string(),
+            "z-model".to_string(),
+        ];
+        let entries = build_live_entries(&live, "the-default", REQUEST_TOPIC, STREAM_TOPIC);
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["the-default", "a-model", "z-model"]);
+    }
+
+    #[test]
+    fn live_default_absent_is_prepended_as_its_own_entry() {
+        // The configured default is NOT in the live list: it must still be first,
+        // prepended as its own enriched entry, and nothing else is dropped.
+        let live = vec!["a-model".to_string(), "z-model".to_string()];
+        let entries = build_live_entries(&live, "gpt-5.5", REQUEST_TOPIC, STREAM_TOPIC);
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-5.5", "a-model", "z-model"]);
+        // The prepended default is enriched (gpt-5.5 is a catalog id).
+        assert_eq!(entries[0].context_window, 1_050_000);
+        assert_eq!(entries[0].description, "OpenAI GPT-5.5");
+    }
+
+    #[test]
+    fn live_default_prepend_never_duplicates() {
+        // Even if the default also appears later in the live list, hoisting must
+        // not leave a duplicate id (dedup runs first, then move-to-front).
+        let live = vec![
+            "x".to_string(),
+            "gpt-5.5".to_string(),
+            "y".to_string(),
+            "gpt-5.5".to_string(),
+        ];
+        let entries = build_live_entries(&live, "gpt-5.5", REQUEST_TOPIC, STREAM_TOPIC);
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-5.5", "x", "y"]);
+    }
+
+    #[test]
+    fn live_entries_drop_blank_ids_and_dedup() {
+        // Defensive: blanks dropped, duplicates collapsed stably even at this layer.
+        let live = vec![
+            "  ".to_string(),
+            "a".to_string(),
+            "a".to_string(),
+            String::new(),
+            "b".to_string(),
+        ];
+        let entries = build_live_entries(&live, "", REQUEST_TOPIC, STREAM_TOPIC);
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn live_entries_share_request_and_stream_topics() {
+        let entries = build_live_entries(
+            &["gpt-5.5".to_string(), "weird-id".to_string()],
+            "gpt-5.5",
+            REQUEST_TOPIC,
+            STREAM_TOPIC,
+        );
+        for e in &entries {
+            assert_eq!(e.request_topic, REQUEST_TOPIC);
+            assert_eq!(e.stream_topic, STREAM_TOPIC);
+        }
     }
 
     #[test]
@@ -489,7 +740,8 @@ mod tests {
             actual, expected,
             "an unknown default must leave the full catalog in catalog order"
         );
-        assert_eq!(entries[0].id, "gpt-5.4");
+        // Catalog head is the current frontier, gpt-5.5.
+        assert_eq!(entries[0].id, "gpt-5.5");
     }
 
     #[test]
